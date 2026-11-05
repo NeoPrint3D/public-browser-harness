@@ -45,6 +45,32 @@ beforeEach(() => {
 });
 
 describe("getChromeUserDataDir", () => {
+  it("discovers and resolves Agent in the harness when the standard root is empty", () => {
+    const harnessRoot = join(homedir(), ".public-browser", "harness", "default", "chrome-profile");
+    const paths = new Set([
+      CHROME_ROOT,
+      join(harnessRoot, "Local State"),
+      join(harnessRoot, "Profile 1"),
+    ]);
+    vi.mocked(existsSync).mockImplementation((p) => paths.has(String(p)));
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+      profile: { info_cache: { "Profile 1": { name: "Agent" } } },
+    }));
+
+    expect(getChromeUserDataDir()).toBe(harnessRoot);
+    expect(discoverProfiles()).toEqual([
+      { name: "Agent", directory: "Profile 1", path: join(harnessRoot, "Profile 1") },
+    ]);
+    expect(resolveProfileSpec("Agent")).toEqual({
+      userDataDir: harnessRoot, profileDirectory: "Profile 1", isRealProfile: true,
+    });
+  });
+
+  it("prefers the standard root when both roots have Local State", () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    expect(getChromeUserDataDir()).toBe(CHROME_ROOT);
+  });
+
   it("returns macOS Chrome path when it exists", () => {
     vi.mocked(existsSync).mockReturnValue(true);
     expect(getChromeUserDataDir()).toBe(CHROME_ROOT);

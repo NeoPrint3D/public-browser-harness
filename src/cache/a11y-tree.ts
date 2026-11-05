@@ -312,9 +312,10 @@ function firstLine(text: string): string {
 /** Token estimation for structured A11y output.
  *  Ratio ~3.5 chars/token accounts for short tokens (brackets, refs, keywords).
  *  FR-H8: Tighter ratio ensures max_tokens is a reliable upper bound. */
+const CHARS_PER_TOKEN = 3.5;
 function estimateTokens(text: string): number {
   if (text.length === 0) return 0;
-  return Math.ceil(text.length / 3.5);
+  return Math.ceil(text.length / CHARS_PER_TOKEN);
 }
 
 const LANDMARK_ROLES = new Set([
@@ -1761,15 +1762,19 @@ export class A11yTreeProcessor {
 
     // Navigation detection — reset refs on real navigation (path change),
     // but preserve refs on hash-only changes (anchor navigation).
-    const urlResult = await cdpClient.send<{ result: { value: string } }>(
-      "Runtime.evaluate",
-      { expression: "document.URL", returnByValue: true },
-      sessionId,
-    );
+    // Independent identity probes share one CDP latency window. Both still
+    // finish before refs/cache are touched; freshness semantics are unchanged.
+    const [urlResult, docId] = await Promise.all([
+      cdpClient.send<{ result: { value: string } }>(
+        "Runtime.evaluate",
+        { expression: "document.URL", returnByValue: true },
+        sessionId,
+      ),
+      this._fetchDocId(cdpClient, sessionId),
+    ]);
     const currentUrl = urlResult.result.value;
     // P21: the document the refs are assigned in (main-frame loaderId). A new
     // document under the same URL (reload by the page) resets like a URL change.
-    const docId = await this._fetchDocId(cdpClient, sessionId);
     if (stripHash(currentUrl) !== stripHash(this.lastUrl) || this._isOtherDocument(docId)) {
       // BUG-016 follow-up (final review MEDIUM #4): also clear
       // sessionNodeMap and _renderSessionId so stale session-ownership
@@ -2784,36 +2789,31 @@ export class A11yTreeProcessor {
     const notesTokens = notesText ? estimateTokens(notesText + "\n") : 0;
     const effectiveBudget = Math.max(0, bodyBudgetTokens - notesTokens);
 
-    // Separate interactive and content lines (same as before)
-    const interactiveIndices = new Set<number>();
+    // Maintain the exact UTF-16 length used by estimateTokens instead of
+    // repeatedly joining/splicing the entire body (quadratic on big pages).
+    // Removal order is unchanged: content from the end, then controls from
+    // the end. Filtering once preserves the original order of survivors.
+    const contentIndices: number[] = [];
+    const interactiveIndices: number[] = [];
+    let bodyChars = Math.max(0, workLines.length - 1); // joining newlines
     for (let i = 0; i < workLines.length; i++) {
       const line = workLines[i];
+      bodyChars += line.length;
       const roleMatch = line.match(/\[e\d+\]\s+(\S+)/);
       const role = roleMatch ? roleMatch[1] : "";
-      if (INTERACTIVE_ROLES.has(role)) {
-        interactiveIndices.add(i);
+      (INTERACTIVE_ROLES.has(role) ? interactiveIndices : contentIndices).push(i);
+    }
+    const removed = new Set<number>();
+    let remaining = workLines.length;
+    for (const indices of [contentIndices, interactiveIndices]) {
+      for (let i = indices.length - 1; i >= 0 && Math.ceil(bodyChars / CHARS_PER_TOKEN) > effectiveBudget; i--) {
+        const index = indices[i];
+        bodyChars -= workLines[index].length + (remaining > 1 ? 1 : 0);
+        remaining--;
+        removed.add(index);
       }
     }
-
-    // Try removing content lines from the end first
-    const result = [...workLines];
-    while (estimateTokens(result.join("\n")) > effectiveBudget && result.length > 0) {
-      // Find last non-interactive line to remove
-      let removedContent = false;
-      for (let i = result.length - 1; i >= 0; i--) {
-        const roleMatch = result[i].match(/\[e\d+\]\s+(\S+)/);
-        const role = roleMatch ? roleMatch[1] : "";
-        if (!INTERACTIVE_ROLES.has(role)) {
-          result.splice(i, 1);
-          removedContent = true;
-          break;
-        }
-      }
-      // If only interactive lines remain and still over budget, remove from end
-      if (!removedContent) {
-        result.pop();
-      }
-    }
+    const result = workLines.filter((_, index) => !removed.has(index));
 
     // Re-append the preserved annotations at the bottom.
     if (truncationMarker !== undefined) result.push(truncationMarker);

@@ -91,15 +91,17 @@ export async function computeDiff(
   retryWaitMs: number,
   signal?: AbortSignal,
 ): Promise<string | null> {
+  const waitForChange = async (waitMs: number): Promise<void> => {
+    if (waitMs <= 0) return;
+    try {
+      await context.waitForAXChange?.(waitMs);
+    } catch (err) {
+      debug("[default-on-tool-result] waitForAXChange threw:", err);
+    }
+  };
   const computeChanges = async (waitMs: number): Promise<DOMChange[]> => {
     if (signal?.aborted) return [];
-    if (waitMs > 0) {
-      try {
-        await context.waitForAXChange?.(waitMs);
-      } catch (err) {
-        debug("[default-on-tool-result] waitForAXChange threw:", err);
-      }
-    }
+    await waitForChange(waitMs);
     if (signal?.aborted) return [];
     await context.a11yTree.refreshPrecomputed(
       context.cdpClient,
@@ -122,12 +124,18 @@ export async function computeDiff(
   if (changes.length === 0 && retryWaitMs > 0) {
     if (signal?.aborted) return null;
     try {
-      await new Promise<void>((r) => setTimeout(r, retryWaitMs));
+      // One retry window, not a delay PLUS another full AX-change timeout.
+      // Keep the minimum settle delay even if a change arrives immediately,
+      // and listen during that delay so slow changes are not missed.
+      await Promise.all([
+        new Promise<void>((r) => setTimeout(r, retryWaitMs)),
+        waitForChange(retryWaitMs),
+      ]);
     } catch (err) {
       debug("[default-on-tool-result] settle delay threw:", err);
     }
     if (signal?.aborted) return null;
-    changes = await computeChanges(retryWaitMs);
+    changes = await computeChanges(0);
   }
 
   if (signal?.aborted) return null;

@@ -22,8 +22,9 @@ export interface ResolvedProfile {
 }
 
 /**
- * Returns the platform-specific Chrome user-data-dir.
- * Returns undefined if the directory doesn't exist.
+ * Returns the platform-specific Chrome user-data-dir, falling back to the
+ * persistent default harness root when the standard root has no Local State.
+ * Returns undefined if neither directory exists.
  */
 export function getChromeUserDataDir(): string | undefined {
   const p = platform();
@@ -37,6 +38,12 @@ export function getChromeUserDataDir(): string | undefined {
   } else {
     dir = join(homedir(), ".config", "google-chrome");
   }
+
+  // The always-on harness uses a dedicated root, not Chrome's OS default.
+  // An empty OS-default directory must not hide its profiles/extensions.
+  if (existsSync(join(dir, "Local State"))) return dir;
+  const harnessDir = join(homedir(), ".public-browser", "harness", "default", "chrome-profile");
+  if (existsSync(join(harnessDir, "Local State"))) return harnessDir;
 
   return existsSync(dir) ? dir : undefined;
 }

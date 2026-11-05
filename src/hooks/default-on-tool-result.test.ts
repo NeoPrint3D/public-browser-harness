@@ -20,13 +20,63 @@
  *  (h) drainPendingDiff returns the diff after background completion
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createDefaultOnToolResult, drainPendingDiff } from "./default-on-tool-result.js";
+import { computeDiff, createDefaultOnToolResult, drainPendingDiff } from "./default-on-tool-result.js";
 import { deferredDiffSlot } from "../cache/deferred-diff-slot.js";
 import type { A11yTreePublic, A11yTreeDiffs } from "./pro-hooks.js";
 import type { CdpClient } from "../cdp/cdp-client.js";
 import type { SessionManager } from "../cdp/session-manager.js";
 import type { ToolResponse } from "../types.js";
 import type { DOMChange, SnapshotMap } from "../cache/a11y-tree.js";
+
+describe("diff retry latency", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("overlaps the retry delay and AX timeout instead of paying both", async () => {
+    const { context, a11yTree, waitForAXChange } = makeContext();
+    waitForAXChange.mockImplementation((ms: number) => new Promise(resolve => setTimeout(() => resolve(false), ms)));
+    const pending = computeDiff(new Map(), context, 0, 500);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a11yTree.refreshPrecomputed).toHaveBeenCalledTimes(1);
+    expect(waitForAXChange).toHaveBeenCalledWith(500);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(a11yTree.refreshPrecomputed).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBeNull();
+    expect(a11yTree.refreshPrecomputed).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the full retry settle window even when AX changes immediately", async () => {
+    const { context, a11yTree } = makeContext();
+    const pending = computeDiff(new Map(), context, 0, 500);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(a11yTree.refreshPrecomputed).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(a11yTree.refreshPrecomputed).toHaveBeenCalledTimes(2);
+  });
+
+  it("settles for the retry window without an AX watcher", async () => {
+    const { context, a11yTree } = makeContext({ omitWaitForAXChange: true });
+    const pending = computeDiff(new Map(), context, 0, 500);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(a11yTree.refreshPrecomputed).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(a11yTree.refreshPrecomputed).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not refresh again when aborted during the shared retry window", async () => {
+    const { context, a11yTree } = makeContext();
+    const abort = new AbortController();
+    const pending = computeDiff(new Map(), context, 0, 500, abort.signal);
+    await vi.advanceTimersByTimeAsync(0);
+    abort.abort();
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(pending).resolves.toBeNull();
+    expect(a11yTree.refreshPrecomputed).toHaveBeenCalledTimes(1);
+  });
+});
 
 type MockOptions = {
   /** Snapshot maps returned by getSnapshotMap() — first call is BEFORE, rest AFTER. */

@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Always-on harness for many agents.** `harness/harness.mjs` supervises one
+  Chrome per named profile with a persistent `--user-data-dir`, a fixed CDP
+  port on `127.0.0.1`, health checks, automatic restarts, and optional systemd
+  user units. Agents attach with `public-browser --attach --port <port>`.
+  Generated MCP configurations use the installed build with absolute paths.
+  Systemd shutdown lets Chrome flush profile databases before terminating its
+  remaining processes. See `harness/README.md`.
+
+### Changed
+- **`--attach` sessions now isolate their tabs.** Attach mode already created
+  its own tab; `virtual_desk` and `switch_tab` now list only tabs created by
+  that server, and a tab opened by `click` is claimed by the server that
+  clicked. Several agents can share one Chrome profile without seeing or
+  switching into each other's tabs. The same ownership filter already existed
+  for `--script` sessions. Graceful disconnect closes all owned tabs;
+  transport-only reconnection reuses surviving owned tabs. Attach-mode restart
+  no longer closes the shared browser, and profile switching is delegated to
+  the harness.
+
 ## [3.0.0] - 2026-09-24
 
 The Python client `publicbrowser` 2.0.0 is released together with this version; `publicbrowser` 1.0.0 does not work with 3.0.0 (see Breaking).

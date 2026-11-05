@@ -28,13 +28,21 @@
   "type": "module",
   "files": [
     "build/",
+    "harness/harness.mjs",
+    "harness/install-cli.sh",
+    "harness/profiles.json",
+    "harness/profiles.example.json",
+    "harness/README.md",
+    "harness/systemd/public-browser-harness@.service.template",
+    "PERFORMANCE.md",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
     "package.json"
   ],
   "bin": {
-    "public-browser": "./build/index.js"
+    "public-browser": "./build/index.js",
+    "public-browser-harness": "./harness/harness.mjs"
   },
   "main": "./build/index.js",
   "exports": {
@@ -64,6 +72,16 @@
     "clean": "node -e \"require('node:fs').rmSync('build',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc && chmod +x build/index.js && cp src/cortex/community-markov.json build/cortex/community-markov.json",
     "test": "vitest run",
+    "harness": "node harness/harness.mjs",
+    "harness:up": "node harness/harness.mjs up",
+    "harness:down": "node harness/harness.mjs down",
+    "harness:status": "node harness/harness.mjs status",
+    "harness:doctor": "node harness/harness.mjs doctor",
+    "harness:install-service": "node harness/harness.mjs install-service",
+    "harness:uninstall-service": "node harness/harness.mjs uninstall-service",
+    "harness:restart": "node harness/harness.mjs restart",
+    "harness:logs": "node harness/harness.mjs logs",
+    "harness:test": "node --test harness/*.test.mjs",
     "pack:check": "node scripts/check-pack.mjs",
     "token-count": "node scripts/token-count.mjs",
     "lint": "eslint .",

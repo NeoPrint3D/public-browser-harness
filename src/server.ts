@@ -57,6 +57,7 @@ export function buildInstructions(patternCount: number): string {
     "Public Browser controls a real Chrome browser via CDP.",
     "",
     "Workflow: virtual_desk → navigate (to open a page) → view_page (read) → click/type/fill_form (act) → view_page (verify the result).",
+    "Keep one MCP connection alive across a task. In shared Chrome, use --attach --agent-id <stable-unique-agent-name> to resume that agent's tabs across MCP restarts. Never share an agent ID between concurrent clients. virtual_desk shows the whole browser with ownership labels. Access a shared tab only deliberately using its exact ID and allow_shared:true; this does not transfer ownership. Shared-page edits can affect other agents. Do not open Chrome directly to recover from a tool error.",
     "",
     "CRITICAL — view_page vs capture_image:",
     "- To see what is on the page: ALWAYS call view_page. It returns text + element refs for click/type.",
@@ -85,6 +86,8 @@ export function buildInstructions(patternCount: number): string {
 export interface StartServerOptions {
   /** Attach-only mode: connect to existing Chrome, no auto-launch, no reconnect. */
   attach?: boolean;
+  /** Stable identity for durable, exclusively leased tabs; requires attach mode. */
+  agentId?: string;
   /**
    * Story 9.1: Script-mode flag. Signals the MCP server that external CDP
    * clients (e.g. Python Script API) are expected on port 9222. The server
@@ -228,6 +231,7 @@ export async function startServer(options?: StartServerOptions): Promise<void> {
     headless: headlessEnv,
     autoLaunch,
     attachMode: effectiveAttach,
+    agentId: options?.agentId ?? process.env.PUBLIC_BROWSER_AGENT_ID,
     scriptMode,
     cdpPort,
     cdpHost,

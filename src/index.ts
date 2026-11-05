@@ -96,6 +96,7 @@ if (isMainModule) {
         if (handled) return;
         return startServer({
           attach: cli.attach,
+          agentId: cli.agentId,
           script: cli.script,
           profile: cli.profile,
           userDataDir: cli.userDataDir,

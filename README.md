@@ -103,6 +103,32 @@ This exercises three core tools in sequence: `navigate` loads the page, `view_pa
 claude mcp remove --scope user public-browser
 ```
 
+## Always-on Chrome for many agents
+
+The MCP server is normally started per agent, which means the first tool call
+launches Chrome. If you want one browser that stays up, keeps a persistent
+profile, and several agents can use at the same time, use the harness:
+
+```bash
+node harness/harness.mjs up
+node harness/harness.mjs status
+node harness/harness.mjs mcp default --client claude --agent-id claude-main
+```
+
+The harness supervises Chrome on a fixed CDP port with a persistent
+`--user-data-dir`, restarts it after a crash, and can install a systemd user
+unit so it starts at boot. Agents use `public-browser --attach --port 9222`;
+add a unique stable `--agent-id` to retain that agent's owned tabs across MCP
+restarts. Each agent has its own active target and isolated headed windows,
+but `virtual_desk` shows the entire browser with owned/shared labels. Use
+`scope: "owned"` for a private-only list, or explicitly access a shared target
+with `switch_tab(tab: "<target ID>", allow_shared: true)`. This grants access,
+not ownership: borrowed pages are never closed by that session's cleanup.
+Switches stay in the background unless `focus: true` is passed. Cookies and
+logins remain shared, and simultaneous edits of a shared page can conflict.
+See [`harness/README.md`](harness/README.md) for profiles, systemd, security
+and the concurrency model.
+
 ## Chrome Profiles
 
 By default, Public Browser starts Chrome with a fresh temp profile — no cookies, no logins, no extensions. You can also start Chrome with one of your own Chrome profiles.
@@ -597,6 +623,12 @@ immediately and never waits, for either a start or a completion.
 | `batch_evaluate` | Visit multiple URLs sequentially and run the same JavaScript expression on each page. |
 | `set_page_data` | Write large payloads to `window.__pb_data[key]` via server-side chunking for data that is too large for a single CDP message. |
 | `evaluate` | Execute JS in page context. Anti-pattern scanner warns on `querySelector`/`.click()`. |
+
+**Tool-call performance.** See [PERFORMANCE.md](PERFORMANCE.md) for hot-path optimizations, reproducible benchmarks, validation, and activation instructions. Microbenchmark improvements are not end-to-end page-load guarantees.
+
+**Concurrent MCP connections.** Use `--attach --agent-id auto` to assign each connection a UUID-based identity, logged to stderr. This avoids lease collisions between separate agents. Auto identities do not resume prior connections' tabs; use an explicit unique `--agent-id <name>` when durable ownership across restarts is required. Concurrent connections must not share an explicit ID. Existing locks are never deleted to bypass an active owner.
+
+**Duplicate click targets.** Pass `index: 0` alongside a CSS `selector` to explicitly choose the first match (`index: 1` chooses the second). Each call queries the current DOM rather than reusing ref IDs. Out-of-range indices fail without clicking. Index cannot be combined with refs, text, or coordinates. Without an index, ambiguity remains an error.
 
 **Selectors are strict.** Where a tool takes a CSS selector (`click`, `type`, `fill_form`, `press_key`, `scroll`, `drag`, `file_upload`, `observe`), it has to match exactly one element in the page's main document. With several matches the call does nothing and returns up to five candidates with their refs — use one of the refs or a narrower selector.
 

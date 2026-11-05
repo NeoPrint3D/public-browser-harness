@@ -23,6 +23,18 @@ export const readPageSchema = z.object({
 
 export type ReadPageParams = z.infer<typeof readPageSchema>;
 
+async function countHiddenControls(cdpClient: CdpClient, sessionId?: string): Promise<number | undefined> {
+  const hiddenResult = await cdpClient.send<{ result: { value: number } }>(
+    "Runtime.evaluate",
+    {
+      expression: `(() => { let h = 0; for (const el of document.querySelectorAll('button,a[href],input:not([type="hidden"]),select,textarea,[role="button"],[role="tab"],[role="link"]')) { if (el.offsetParent === null) { const p = getComputedStyle(el).position; if (p !== "fixed" && p !== "sticky") h++; } } return h; })()`,
+      returnByValue: true,
+    },
+    sessionId,
+  );
+  return hiddenResult?.result?.value;
+}
+
 export async function readPageHandler(
   params: ReadPageParams,
   cdpClient: CdpClient,
@@ -33,13 +45,21 @@ export async function readPageHandler(
   const method = "view_page";
 
   try {
-    const result = await a11yTree.getTree(cdpClient, sessionId!, {
-      depth: params.depth,
-      ref: params.ref,
-      filter: params.filter,
-      max_tokens: params.max_tokens,
-      fresh: true, // Story 13a.2 fix: always fetch fresh data — precomputed cache may be stale after SPA navigation
-    }, sessionManager);
+    // The hidden-control count is advisory and independent of AX fetching.
+    // Catch its failure immediately so a failed tree read cannot leave an
+    // unhandled rejection behind. Do not cache either observation.
+    const [result, hiddenCount] = await Promise.all([
+      a11yTree.getTree(cdpClient, sessionId!, {
+        depth: params.depth,
+        ref: params.ref,
+        filter: params.filter,
+        max_tokens: params.max_tokens,
+        fresh: true, // Always fresh after SPA navigation.
+      }, sessionManager),
+      params.filter === "interactive"
+        ? countHiddenControls(cdpClient, sessionId).catch(() => undefined)
+        : Promise.resolve(undefined),
+    ]);
 
     let responseText = result.text;
 
@@ -68,15 +88,7 @@ export async function readPageHandler(
     // FR-H6: Detect hidden interactive elements — hint when page has hidden sections
     if (params.filter === "interactive" && result.refCount > 0) {
       try {
-        const hiddenResult = await cdpClient.send<{ result: { value: number } }>(
-          "Runtime.evaluate",
-          {
-            expression: `(() => { let h = 0; for (const el of document.querySelectorAll('button,a[href],input:not([type="hidden"]),select,textarea,[role="button"],[role="tab"],[role="link"]')) { if (el.offsetParent === null) { const p = getComputedStyle(el).position; if (p !== "fixed" && p !== "sticky") h++; } } return h; })()`,
-            returnByValue: true,
-          },
-          sessionId,
-        );
-        const hiddenCount = hiddenResult?.result?.value;
+        // Count was collected alongside the fresh AX tree above.
         if (typeof hiddenCount === "number" && hiddenCount >= 5) {
           // Stufe 2 H3: the count is state and comes every time; the advice
           // after it comes once per MCP session.

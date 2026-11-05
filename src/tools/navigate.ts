@@ -222,32 +222,24 @@ async function buildSuccessResponse(
   // FR-025: Mask navigator.webdriver after page load — Chrome re-applies the
   // native getter on every new document, so we override it post-navigation.
   // No-op when stealth is disabled (--no-stealth / SILBERCUE_STEALTH=0).
-  await applyWebdriverMask(cdpClient, sessionId, { newDocument: false });
-
-  let finalUrl = "unknown";
-  let title = "";
-
-  try {
-    const urlResult = await cdpClient.send<EvalResult>(
+  // These post-load operations are independent. Issue them together rather
+  // than paying three serial CDP round trips. allSettled preserves the
+  // independent best-effort URL/title fallbacks when a context disappears.
+  const [, urlResult, titleResult] = await Promise.allSettled([
+    applyWebdriverMask(cdpClient, sessionId, { newDocument: false }),
+    cdpClient.send<EvalResult>(
       "Runtime.evaluate",
       { expression: "document.URL", returnByValue: true },
       sessionId,
-    );
-    finalUrl = urlResult.result.value;
-  } catch {
-    // URL retrieval failed — continue with "unknown"
-  }
-
-  try {
-    const titleResult = await cdpClient.send<EvalResult>(
+    ),
+    cdpClient.send<EvalResult>(
       "Runtime.evaluate",
       { expression: "document.title", returnByValue: true },
       sessionId,
-    );
-    title = titleResult.result.value;
-  } catch {
-    // Title retrieval failed — continue with empty title
-  }
+    ),
+  ]);
+  const finalUrl = urlResult.status === "fulfilled" ? urlResult.value.result.value : "unknown";
+  const title = titleResult.status === "fulfilled" ? titleResult.value.result.value : "";
 
   const elapsedMs = Math.round(performance.now() - start);
 

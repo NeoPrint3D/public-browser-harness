@@ -222,23 +222,6 @@ function formatMs(ms: number): string {
  * Non-empty text = busy state (tier + metrics + action, logo = black dot).
  */
 export async function updateOverlayStatus(cdpClient: CdpClient, sessionId: string, text: string): Promise<void> {
-  // Self-healing: re-inject overlay if it was removed (e.g. SPA rebuild, page reload)
-  try {
-    const { result } = await cdpClient.send<{ result: { value: boolean } }>(
-      "Runtime.evaluate",
-      { expression: `!!document.getElementById('${OVERLAY_ID}')`, returnByValue: true },
-      sessionId,
-    );
-    if (!result.value) {
-      await cdpClient.send("Runtime.evaluate", { expression: OVERLAY_SCRIPT, awaitPromise: false }, sessionId);
-      // Set logo image after re-injection
-      await cdpClient.send("Runtime.evaluate", {
-        expression: `(() => { var h = document.getElementById('${OVERLAY_ID}'); if (h && h.shadowRoot) { var l = h.shadowRoot.querySelector('.sc-logo'); if (l) l.style.backgroundImage = 'url(data:image/png;base64,` + LOGO_BASE64 + `)'; } })()`,
-        awaitPromise: false,
-      }, sessionId);
-    }
-  } catch { /* non-critical */ }
-
   const isIdle = text === "";
   const tier = _tierLabel.replace(/'/g, "\\'");
   const action = text.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
@@ -253,11 +236,11 @@ export async function updateOverlayStatus(cdpClient: CdpClient, sessionId: strin
 
   const script = `(() => {
   var host = document.getElementById('${OVERLAY_ID}');
-  if (!host || !host.shadowRoot) return;
+  if (!host || !host.shadowRoot) return false;
   var sr = host.shadowRoot;
   var logo = sr.querySelector('.sc-logo');
   var textArea = sr.getElementById('sc-text-area');
-  if (!logo || !textArea) return;
+  if (!logo || !textArea) return false;
   logo.classList.add('ready');
   ${isIdle ? "logo.classList.remove('busy');" : "logo.classList.add('busy');"}
   var segs = ${segmentsJson};
@@ -267,11 +250,25 @@ export async function updateOverlayStatus(cdpClient: CdpClient, sessionId: strin
     html += '<span>' + segs[i] + '</span>';
   }
   textArea.innerHTML = html;
+  return true;
 })()`;
   try {
-    await cdpClient.send("Runtime.evaluate", { expression: script, awaitPromise: false }, sessionId);
+    // Probe and update atomically: the normal path needs ONE CDP call,
+    // not an existence check followed by a second evaluation.
+    const { result } = await cdpClient.send<{ result?: { value?: boolean } }>(
+      "Runtime.evaluate", { expression: script, returnByValue: true, awaitPromise: false }, sessionId,
+    );
+    if (result?.value === false) {
+      // Self-heal only when absent (SPA rebuild/reload). Combine injection
+      // and logo setup in one evaluation, then apply the requested status.
+      await cdpClient.send("Runtime.evaluate", {
+        expression: OVERLAY_SCRIPT + `;(() => { var h = document.getElementById('${OVERLAY_ID}'); if (h && h.shadowRoot) { var l = h.shadowRoot.querySelector('.sc-logo'); if (l) l.style.backgroundImage = 'url(data:image/png;base64,` + LOGO_BASE64 + `)'; } })()`,
+        awaitPromise: false,
+      }, sessionId);
+      await cdpClient.send("Runtime.evaluate", { expression: script, awaitPromise: false }, sessionId);
+    }
   } catch {
-    // Non-critical
+    // Non-critical: a missing execution context must not break the tool.
   }
 }
 

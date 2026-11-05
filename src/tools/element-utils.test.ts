@@ -551,6 +551,47 @@ describe("resolveElement", () => {
     expect(result).toMatchObject({ ref: "e2", role: "button", name: "OK", resolvedVia: "css" });
   });
 
+  it.each([0, 1, 2])("resolves explicit CSS match index %i", async (index) => {
+    const cdp = mockCdpClient(undefined, { "DOM.querySelectorAll": { nodeIds: [11, 22, 33] } });
+    await resolveElement(cdp, "main-session", { selector: "a[href]", index });
+    expect(cdp.send).toHaveBeenCalledWith("DOM.describeNode", { nodeId: [11, 22, 33][index] }, "main-session");
+    expect(cdp.send).toHaveBeenCalledWith("DOM.querySelectorAll", { nodeId: 1, selector: "a[href]" }, "main-session");
+  });
+
+  it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])("rejects invalid index %s", async (index) => {
+    const cdp = mockCdpClient();
+    await expect(resolveElement(cdp, "s1", { selector: "a", index })).rejects.toThrow("non-negative safe integer");
+    expect(cdp.send).not.toHaveBeenCalled();
+  });
+
+  it("rejects an out-of-range index without resolving a node", async () => {
+    const cdp = mockCdpClient(undefined, { "DOM.querySelectorAll": { nodeIds: [11, 22] } });
+    await expect(resolveElement(cdp, "s1", { selector: "a", index: 2 })).rejects.toThrow("index 2 is out of range");
+    expect(cdp.send).not.toHaveBeenCalledWith("DOM.resolveNode", expect.anything(), expect.anything());
+  });
+
+  it.each([{ ref: "e2", selector: "a", index: 0 }, { index: 0 }])("rejects index without an exclusive selector", async (target) => {
+    const cdp = mockCdpClient();
+    await expect(resolveElement(cdp, "s1", target)).rejects.toThrow("index requires a CSS selector");
+    expect(cdp.send).not.toHaveBeenCalled();
+  });
+
+  it("queries indexed selectors again after DOM changes", async () => {
+    let nextNode = 11;
+    const cdp = mockCdpClient();
+    vi.mocked(cdp.send).mockImplementation(async (method: string) => {
+      if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+      if (method === "DOM.querySelectorAll") return { nodeIds: [nextNode++, 99] };
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 42 } };
+      if (method === "DOM.resolveNode") return { object: { objectId: "obj" } };
+      return {};
+    });
+    await resolveElement(cdp, "s1", { selector: "a", index: 0 });
+    await resolveElement(cdp, "s1", { selector: "a", index: 0 });
+    expect(cdp.send).toHaveBeenCalledWith("DOM.describeNode", { nodeId: 11 }, "s1");
+    expect(cdp.send).toHaveBeenCalledWith("DOM.describeNode", { nodeId: 12 }, "s1");
+  });
+
   it("S3: rejects a selector with several matches and lists up to five candidates", async () => {
     const labels = ["Reset All", "Level 1", "Level 2", "Level 3", "Level 4", "Verify"];
     const buttons: AXNode[] = [

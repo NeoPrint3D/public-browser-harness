@@ -5,7 +5,9 @@ import type { TabStateCache } from "../cache/tab-state-cache.js";
 import { wrapCdpError } from "./error-utils.js";
 import { VERSION } from "../version.js";
 
-export const virtualDeskSchema = z.object({});
+export const virtualDeskSchema = z.object({
+  scope: z.enum(["all", "owned"]).optional().describe("all (default): full browser landscape with ownership labels; owned: only this session's tabs"),
+});
 export type VirtualDeskParams = z.infer<typeof virtualDeskSchema>;
 
 interface TargetInfo {
@@ -52,7 +54,7 @@ function inferLoadingState(target: TargetInfo): "loading" | "ready" {
 
 /**
  * Story 9.1: Optional filter predicate for script mode.
- * When provided, only tabs passing this filter are shown in the desk view.
+ * Used to label ownership; only filters when scope is explicitly owned.
  */
 export type TabFilter = (targetId: string) => boolean;
 
@@ -96,8 +98,9 @@ export async function virtualDeskHandler(
     const { targetInfos } = await cdpClient.send<{ targetInfos: TargetInfo[] }>(
       "Target.getTargets",
     );
-    // Story 9.1: In script mode, only show MCP-owned tabs
-    const pageTabs = targetInfos.filter((t) => t.type === "page" && (!tabFilter || tabFilter(t.targetId)));
+    // Visibility is browser-wide; ownership controls custody, not discovery.
+    const pageTabs = targetInfos.filter((t) => t.type === "page"
+      && (_params.scope !== "owned" || !tabFilter || tabFilter(t.targetId)));
 
     if (pageTabs.length === 0) {
       return {
@@ -154,15 +157,20 @@ export async function virtualDeskHandler(
         const status = cached?.loadingState ?? inferLoadingState(tab);
         const marker = isActive ? ">" : " ";
 
-        lines.push(`${marker} Tab ${tabCounter}: ${tab.targetId} | ${status} | ${title} | ${url}`);
+        const ownership = tabFilter ? (tabFilter(tab.targetId) ? "owned" : "shared; not owned") : "unrestricted";
+        lines.push(`${marker} Tab ${tabCounter}: ${tab.targetId} | ${ownership} | ${status} | ${title} | ${url}`);
       }
+    }
+
+    if (tabFilter && _params.scope !== "owned") {
+      lines.push("", 'Shared tabs are visible, not adopted. To access one explicitly use switch_tab(tab: "<target ID>", allow_shared: true). Shared tabs are never closed by session cleanup.');
     }
 
     // If no active session exists, append recovery hint so the LLM knows how to reconnect
     if (!activeExists && pageTabs.length > 0) {
       lines.push(
         "",
-        'Note: No active session. Call switch_tab(tab: "1") to reconnect before using navigate or view_page.',
+        'Note: No active session. Switch to an owned target ID, or explicitly opt into a shared target with allow_shared: true, before using navigate or view_page.',
       );
     }
 

@@ -38,10 +38,23 @@ const raw = execFileSync("npm", ["pack", "--dry-run", "--json"], {
 });
 
 const packEntries = JSON.parse(raw);
-const files = packEntries[0]?.files?.map((file) => file.path) ?? [];
+// npm <=11 returns an array; npm 12 can return a map keyed by package name.
+const packed = Array.isArray(packEntries) ? packEntries[0] : Object.values(packEntries)[0];
+const files = packed?.files?.map((file) => file.path) ?? [];
 const fileSet = new Set(files);
 
-const allowedExact = new Set(["README.md", "CHANGELOG.md", "LICENSE", "package.json"]);
+const harnessFiles = [
+  "harness/harness.mjs",
+  "harness/profiles.json",
+  "harness/profiles.example.json",
+  "harness/README.md",
+  "harness/systemd/public-browser-harness@.service.template",
+];
+const allowedExact = new Set(["README.md", "CHANGELOG.md", "LICENSE", "package.json", "PERFORMANCE.md", ...harnessFiles]);
+const missingHarness = harnessFiles.filter((file) => !fileSet.has(file));
+if (missingHarness.length > 0) {
+  fail(`npm pack is missing harness service assets:\n${missingHarness.join("\n")}`);
+}
 const disallowed = files.filter((file) =>
   file.startsWith("build/license/")
   || file.startsWith("build/test-utils/")
@@ -62,7 +75,8 @@ if (unexpected.length > 0) {
 const exportTargets = collectExportTargets(packageJson.exports).map((target) =>
   target.replace(/^\.\//, ""),
 );
-const missingExports = exportTargets.filter((target) => !fileSet.has(target));
+const binTargets = Object.values(packageJson.bin ?? {}).map((target) => target.replace(/^\.\//, ""));
+const missingExports = [...exportTargets, ...binTargets].filter((target) => !fileSet.has(target));
 
 if (missingExports.length > 0) {
   fail(`package.json exports point to files missing from npm pack:\n${missingExports.join("\n")}`);

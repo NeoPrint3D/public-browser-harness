@@ -362,6 +362,26 @@ describe("clickHandler", () => {
     );
   });
 
+  it("passes an explicit match index to the selector resolver", async () => {
+    const { cdpClient } = createMockCdp();
+    const result = await clickHandler({ selector: "a[href]", index: 0 }, cdpClient, "s1");
+    expect(result.isError).not.toBe(true);
+    expect(mockResolveElement).toHaveBeenCalledWith(cdpClient, "s1", { selector: "a[href]", index: 0 }, undefined);
+  });
+
+  it.each([
+    { index: 0 },
+    { index: 0, ref: "e7", selector: "a" },
+    { index: 0, text: "Go", selector: "a" },
+    { index: 0, selector: "a", x: 10, y: 20 },
+  ])("rejects conflicting index targets without clicking", async (params) => {
+    const { cdpClient, sendFn } = createMockCdp();
+    const result = await clickHandler(params, cdpClient, "s1");
+    expect(result.isError).toBe(true);
+    expect(mockResolveElement).not.toHaveBeenCalled();
+    expect(sendFn.mock.calls.map((c: unknown[]) => c[0])).not.toContain("Input.dispatchMouseEvent");
+  });
+
   // Pins the pass-through: click must not swallow or trim the candidate list.
   it("S3: an ambiguous selector clicks nothing and passes the candidate list through", async () => {
     const ambiguous = "Selector 'button' matches 23 elements, so nothing was done. Use a ref or a more specific selector. Candidates:\n  [e26] button \"Reset All\"";

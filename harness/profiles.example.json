@@ -1,0 +1,28 @@
+{
+  "defaultProfile": "default",
+  "stateDir": "~/.public-browser/harness",
+  "profiles": {
+    "default": {
+      "port": 9222,
+      "headless": false,
+      "stealth": true,
+      "restoreLastSession": true,
+      "windowSize": "1440,900"
+    },
+    "work": {
+      "port": 9333,
+      "headless": false,
+      "stealth": true,
+      "restoreLastSession": true,
+      "windowSize": "1440,900",
+      "extraArgs": []
+    },
+    "research": {
+      "port": 9334,
+      "headless": true,
+      "stealth": true,
+      "restoreLastSession": false,
+      "windowSize": "1280,800"
+    }
+  }
+}

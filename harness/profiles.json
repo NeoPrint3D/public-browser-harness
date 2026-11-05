@@ -1,0 +1,17 @@
+{
+  "defaultProfile": "default",
+  "stateDir": "~/.public-browser/harness",
+  "profiles": {
+    "default": {
+      "port": 9222,
+      "profileDirectory": "Profile 1",
+      "downloadDir": "/home/drew/Downloads",
+      "headless": false,
+      "stealth": true,
+      "restoreLastSession": true,
+      "windowSize": "1440,900",
+      "startupUrl": "about:blank",
+      "extraArgs": ["--no-portal"]
+    }
+  }
+}

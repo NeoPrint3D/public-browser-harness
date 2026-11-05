@@ -10,7 +10,7 @@ export default tseslint.config(
   },
   {
     // CLI und Tooling-Scripts geben bewusst auf der Konsole aus
-    files: ["scripts/**", "src/cli/**"],
+    files: ["scripts/**", "src/cli/**", "harness/**"],
     rules: {
       "no-console": "off",
     },

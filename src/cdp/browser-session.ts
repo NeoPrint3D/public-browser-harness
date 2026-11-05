@@ -27,6 +27,7 @@
  */
 
 import { ChromeLauncher, type ChromeConnection } from "./chrome-launcher.js";
+import { AgentTabState } from "./agent-tab-state.js";
 import { resolveProfileSpec, isChromeRunningWithProfile } from "./chrome-profiles.js";
 import { SessionManager } from "./session-manager.js";
 import { DialogHandler } from "./dialog-handler.js";
@@ -71,6 +72,13 @@ export interface IBrowserSession {
   readonly sessionId: string;
   readonly headless: boolean;
   readonly scriptMode: boolean;
+  /**
+   * Whether tabs created by this session are isolated from tabs created by
+   * other clients. True in script mode (external CDP clients) and in attach
+   * mode (several agents share one Chrome, each owns its own tab).
+   * Optional so legacy test mocks that predate the field still type-check.
+   */
+  readonly isolatedTabs?: boolean;
   readonly tabStateCache: TabStateCache;
   readonly sessionDefaults: SessionDefaults;
   readonly sessionManager: SessionManager | undefined;
@@ -126,6 +134,8 @@ export interface BrowserSessionOptions {
    * interfere with the primary MCP session's tabs.
    */
   attachMode?: boolean;
+  /** Stable attach-mode identity; preserves owned tabs across MCP lifetimes. */
+  agentId?: string;
   /**
    * Story 9.1: Script mode. When enabled, the MCP server uses set-based
    * ownership tracking to distinguish MCP-created tabs from externally
@@ -231,6 +241,12 @@ export class BrowserSession implements IBrowserSession {
   private readonly _freshDelays: number[];
   private readonly _attachMode: boolean;
   private readonly _scriptMode: boolean;
+  /**
+   * Tab isolation is active in script mode (external CDP clients may create
+   * tabs) and in attach mode (several agents share one Chrome). In both
+   * cases only tabs this session created are visible to its tools.
+   */
+  private readonly _isolatedTabs: boolean;
   private readonly _cdpPort: number;
   private readonly _cdpHost: string;
   private readonly _stealth: boolean;
@@ -245,6 +261,7 @@ export class BrowserSession implements IBrowserSession {
    * tabs (created by Python scripts or other CDP clients) are ignored.
    */
   private readonly _ownedTargetIds = new Set<string>();
+  private readonly _agentTabState?: AgentTabState;
 
   // Connection state — null until the first ensureReady() succeeds.
   private _connection: ChromeConnection | null = null;
@@ -283,8 +300,16 @@ export class BrowserSession implements IBrowserSession {
     this._options = options;
     this._attachMode = options.attachMode ?? false;
     this._scriptMode = options.scriptMode ?? false;
+    this._isolatedTabs = this._scriptMode || this._attachMode;
     this._cdpPort = options.cdpPort ?? 9222;
     this._cdpHost = options.cdpHost ?? "127.0.0.1";
+    if (options.agentId) {
+      if (!this._attachMode) throw new Error("--agent-id requires --attach");
+      this._agentTabState = new AgentTabState(options.agentId, this._cdpHost, this._cdpPort);
+      console.error(`Public Browser agent ID: ${this._agentTabState.agentId}`);
+      for (const targetId of this._agentTabState.targets) this._ownedTargetIds.add(targetId);
+      this._ownedTabTargetId = this._agentTabState.active ?? null;
+    }
     // Stealth is resolved once per session and pushed into the module-level
     // runtime flag that navigate/switch-tab read (see cdp/stealth.ts).
     this._stealth = resolveStealth(
@@ -342,6 +367,11 @@ export class BrowserSession implements IBrowserSession {
     // has no way to express it, and rebuilding for a null spec would drop the
     // running Chrome for no gain.
     if (profileSpec === this._appliedProfileSpec || !profileSpec) return false;
+
+    if (this._attachMode) {
+      this.sessionDefaults.setDefault("_profile", null);
+      throw new Error("This session attaches to an externally managed Chrome. Choose its profile through the harness and attach to that profile's port; configure_session cannot change it.");
+    }
 
     const resolved = resolveProfileSpec(profileSpec);
     const chromeRunning = isChromeRunningWithProfile(resolved.userDataDir);
@@ -456,6 +486,15 @@ export class BrowserSession implements IBrowserSession {
     return this._scriptMode;
   }
 
+  /**
+   * Whether only tabs created by this session are visible to its tools.
+   * True in script mode and in attach mode; false for a Chrome this session
+   * launched itself (all tabs in that Chrome belong to the session).
+   */
+  get isolatedTabs(): boolean {
+    return this._isolatedTabs;
+  }
+
   /** Story 9.9: CDP debugging port for Escape Hatch WebSocket URLs. */
   get cdpPort(): number {
     return this._cdpPort;
@@ -495,21 +534,31 @@ export class BrowserSession implements IBrowserSession {
 
   /**
    * Story 9.1: Check whether a target is owned by the MCP session.
-   * In non-script mode this always returns true (all tabs are "owned").
+   * When tab isolation is off this always returns true (all tabs are ours).
    */
   isOwnedTarget(targetId: string): boolean {
-    if (!this._scriptMode) return true;
+    if (!this._isolatedTabs) return true;
     return this._ownedTargetIds.has(targetId);
   }
 
   /** Story 9.1: Register a tab as MCP-owned. */
   trackOwnedTarget(targetId: string): void {
     this._ownedTargetIds.add(targetId);
+    this._saveAgentTabs();
   }
 
   /** Story 9.1: Unregister a tab from MCP ownership. */
   untrackOwnedTarget(targetId: string): void {
     this._ownedTargetIds.delete(targetId);
+    this._saveAgentTabs();
+  }
+
+  private _saveAgentTabs(): void {
+    const current = this.tabStateCache?.activeTargetId;
+    const active = current && this._ownedTargetIds.has(current) ? current
+      : this._ownedTabTargetId && this._ownedTargetIds.has(this._ownedTabTargetId) ? this._ownedTabTargetId
+      : this._ownedTargetIds.values().next().value;
+    this._agentTabState?.save(this._ownedTargetIds, active);
   }
 
   // ── Relaunch notice ─────────────────────────────────────────────────
@@ -683,28 +732,30 @@ export class BrowserSession implements IBrowserSession {
     // /json/version on the WebSocket path). Use the connection's value.
     setHeadless(connection.headless);
 
-    // 1. Attach to a page target.
-    //    In attach mode we ALWAYS create our own tab — the existing tabs
-    //    belong to the primary MCP session (e.g. Claude Code).
+    // 1. First attach creates a private tab. After a transport-only failure,
+    // reuse our active tab so page state survives; never adopt foreign tabs.
     let pageTarget: TargetInfo;
     if (this._attachMode) {
-      // M1-Fix: Close the previous owned tab before creating a new one
-      // to prevent tab leaks on reconnect. Fire-and-forget is acceptable.
-      if (this._ownedTabTargetId) {
-        const staleTabId = this._ownedTabTargetId;
-        this._ownedTabTargetId = null;
-        await bestEffort(
-          cdpClient.send("Target.closeTarget", { targetId: staleTabId }),
-          CLEANUP_CDP_TIMEOUT_MS,
-          "Target.closeTarget (stale tab)",
-        );
+      const { targetInfos } = await cdpClient.send<{ targetInfos: TargetInfo[] }>("Target.getTargets");
+      const pages = targetInfos.filter((target) => target.type === "page");
+      const liveIds = new Set(pages.map((target) => target.targetId));
+      for (const targetId of this._ownedTargetIds) {
+        if (!liveIds.has(targetId)) this._ownedTargetIds.delete(targetId);
       }
-      const { targetId } = await cdpClient.send<{ targetId: string }>(
-        "Target.createTarget",
-        { url: "about:blank" },
-      );
-      pageTarget = { targetId, type: "page", url: "about:blank" };
-      this._ownedTabTargetId = targetId;
+      if (this._ownedTabTargetId && !liveIds.has(this._ownedTabTargetId)) {
+        this._ownedTabTargetId = null;
+      }
+      const owned = pages.filter((target) => this._ownedTargetIds.has(target.targetId));
+      const previous = owned.find((target) => target.targetId === (this.tabStateCache.activeTargetId ?? this._ownedTabTargetId)) ?? owned[0];
+      if (previous) {
+        pageTarget = previous;
+      } else {
+        const { targetId } = await cdpClient.send<{ targetId: string }>(
+          "Target.createTarget", { url: "about:blank", ...(!connection.headless ? { newWindow: true } : {}) },
+        );
+        pageTarget = { targetId, type: "page", url: "about:blank" };
+        this._ownedTabTargetId = targetId;
+      }
     } else {
       const { targetInfos } = await cdpClient.send<{ targetInfos: TargetInfo[] }>(
         "Target.getTargets",
@@ -727,11 +778,12 @@ export class BrowserSession implements IBrowserSession {
     this._sessionId = sessionId;
     this._pageTargetId = pageTarget.targetId;
 
-    // Story 9.1: Track the initial tab as MCP-owned. In script mode this
-    // ensures the first tab is visible to MCP tools while externally
-    // created tabs are ignored.
-    if (this._scriptMode) {
+    // Story 9.1: Track the initial tab as MCP-owned. In script mode and
+    // attach mode this ensures the first tab is visible to MCP tools while
+    // tabs created by other clients/agents are ignored.
+    if (this._isolatedTabs) {
       this._ownedTargetIds.add(pageTarget.targetId);
+      this._agentTabState?.save(this._ownedTargetIds, pageTarget.targetId);
     }
 
     // 2. Activate CDP domains on the page session.
@@ -783,7 +835,7 @@ export class BrowserSession implements IBrowserSession {
 
     // 6. Attach-mode: register process exit handler to close our owned tab.
     //    Uses the synchronous 'exit' event pattern (same as ChromeConnection).
-    if (this._attachMode && this._ownedTabTargetId && !this._attachExitHandler) {
+    if (this._attachMode && !this._agentTabState && this._ownedTabTargetId && !this._attachExitHandler) {
       this._attachExitHandler = () => {
         this._closeOwnedTabSync();
       };
@@ -903,6 +955,7 @@ export class BrowserSession implements IBrowserSession {
    */
   applyTabSwitch(newSessionId: string): void {
     this._sessionId = newSessionId;
+    this._saveAgentTabs();
 
     // BUG-019: DialogHandler must follow the active session, otherwise
     // alerts on a switched-to tab are never auto-dismissed.
@@ -968,32 +1021,34 @@ export class BrowserSession implements IBrowserSession {
 
   // ── Attach-mode tab cleanup ─────────────────────────────────────────
 
-  /**
-   * Best-effort synchronous close of the tab we created in attach mode.
-   * Called from the process 'exit' handler where we cannot await.
-   * The CDP send is fire-and-forget (the process is exiting anyway).
-   */
+  /** Best-effort exit cleanup; graceful shutdown uses the bounded async path. */
   private _closeOwnedTabSync(): void {
-    if (!this._ownedTabTargetId || !this._cdpClient) return;
-    try {
-      // Fire-and-forget: process is exiting, we cannot await.
-      void this._cdpClient.send("Target.closeTarget", {
-        targetId: this._ownedTabTargetId,
-      });
-    } catch {
-      /* tab may already be closed by user — graceful */
+    if (!this._cdpClient) return;
+    const targets = new Set(this._ownedTargetIds);
+    if (this._ownedTabTargetId) targets.add(this._ownedTabTargetId);
+    for (const targetId of targets) {
+      try {
+        void this._cdpClient.send("Target.closeTarget", { targetId }).catch(() => {});
+      } catch { /* the connection may already be closed */ }
     }
+    this._ownedTargetIds.clear();
     this._ownedTabTargetId = null;
   }
 
-  /**
-   * Async close of the owned attach-mode tab. Used during graceful
-   * shutdown (SIGTERM/SIGINT) where we still have event-loop time.
-   */
+  /** Close all attach-mode tabs, including popups and switch_tab-created tabs. */
   private async _closeOwnedTabAsync(): Promise<void> {
-    if (!this._ownedTabTargetId || !this._cdpClient) return;
-    const targetId = this._ownedTabTargetId;
+    if (!this._cdpClient) return;
+    const targets = new Set(this._ownedTargetIds);
+    if (this._ownedTabTargetId) targets.add(this._ownedTabTargetId);
     this._ownedTabTargetId = null;
+    this._ownedTargetIds.clear();
+    for (const targetId of targets) {
+      await this._closeAttachTarget(targetId);
+    }
+  }
+
+  private async _closeAttachTarget(targetId: string): Promise<void> {
+    if (!this._cdpClient) return;
 
     // Closing the LAST page target takes Chrome down with it — and in attach
     // mode that Chrome belongs to someone else. Leaving an about:blank tab
@@ -1072,10 +1127,14 @@ export class BrowserSession implements IBrowserSession {
       } catch { /* best effort */ }
     }
 
-    // Close Chrome via CDP before teardown so it actually shuts down
-    // (not just WebSocket disconnect). Without this, an attached Chrome
-    // stays running and restart() reconnects to the old instance.
-    if (this._cdpClient) {
+    // An attach-only agent does not own Chrome. Restart its connection,
+    // not the shared browser (which would interrupt every other agent).
+    if (this._attachMode) {
+      this._applyDeferredProfile();
+      if (this._agentTabState) this._saveAgentTabs();
+      else await this._closeOwnedTabAsync();
+    }
+    if (this._cdpClient && !this._attachMode) {
       try {
         await this._cdpClient.send("Browser.close");
       } catch { /* Chrome may already be closing */ }
@@ -1111,9 +1170,10 @@ export class BrowserSession implements IBrowserSession {
       );
     }
 
-    // Attach-mode: close our owned tab before tearing down.
+    // Named agents retain their exact owned tabs; anonymous sessions clean up.
     if (this._attachMode) {
-      await this._closeOwnedTabAsync();
+      if (this._agentTabState) this._saveAgentTabs();
+      else await this._closeOwnedTabAsync();
       // Remove the process exit handler — shutdown is handling cleanup.
       if (this._attachExitHandler) {
         globalThis.process.removeListener("exit", this._attachExitHandler);
@@ -1121,7 +1181,11 @@ export class BrowserSession implements IBrowserSession {
       }
     }
 
-    await this._teardownHelpers();
-    await this._teardownConnectionOnly();
+    try {
+      await this._teardownHelpers();
+      await this._teardownConnectionOnly();
+    } finally {
+      this._agentTabState?.release();
+    }
   }
 }

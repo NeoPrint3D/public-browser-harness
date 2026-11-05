@@ -11,6 +11,8 @@ import { applyWebdriverMask } from "../cdp/stealth.js";
 import { a11yTree } from "../cache/a11y-tree.js";
 
 export const switchTabSchema = z.object({
+  allow_shared: z.boolean().optional().describe("Explicitly access a non-owned tab by exact target ID; never adopts or closes it"),
+  focus: z.boolean().optional().describe("Bring switched page to foreground; default false for isolated sessions"),
   action: z
     .enum(["open", "switch", "close"])
     .optional()
@@ -252,6 +254,10 @@ async function handleOpen(
   // Create new tab
   const { targetId } = await cdpClient.send<{ targetId: string }>("Target.createTarget", {
     url,
+    // Shared Chrome's foreground window may belong to a human/another agent.
+    // CDP has no windowId selector here; isolate the page instead of adding
+    // it to whichever window happened to be focused most recently.
+    ...(tabOwnership && !isHeadless() ? { newWindow: true } : {}),
   });
 
   // Story 9.1: Track the new tab as MCP-owned
@@ -309,13 +315,13 @@ async function handleSwitch(
   if (!params.tab) {
     // No tab: list available tabs so the LLM can pick one
     const { targetInfos } = await cdpClient.send<{ targetInfos: TargetInfo[] }>("Target.getTargets");
-    // Story 9.1: Filter to owned tabs only when tab ownership tracking is active
-    const pageTabs = targetInfos.filter((t) => t.type === "page" && (!tabOwnership || tabOwnership.filter(t.targetId)));
-    a11yTree.retainTabs(pageTabs.map((t) => t.targetId)); // B1: tabs closed without switch_tab
+    const pageTabs = targetInfos.filter((t) => t.type === "page");
+    a11yTree.retainTabs(pageTabs.map((t) => t.targetId));
     const activeId = tabStateCache.activeTargetId;
     const lines = pageTabs.map((t, i) => {
       const marker = t.targetId === activeId ? "★" : " ";
-      return `${marker} Tab ${i + 1}: ${t.targetId} | ${t.title} | ${t.url}`;
+      const ownership = !tabOwnership || tabOwnership.filter(t.targetId) ? "owned" : "shared; use exact ID and allow_shared:true";
+      return `${marker} Tab ${i + 1}: ${t.targetId} | ${ownership} | ${t.title} | ${t.url}`;
     });
     return {
       content: [{ type: "text", text: `Tabs (${pageTabs.length} open):\n${lines.join("\n")}` }],
@@ -323,11 +329,11 @@ async function handleSwitch(
     };
   }
 
-  // Verify tab exists before switching (supports numeric index or targetId)
+  // Resolve against the global desk. Numeric indices are unstable as other
+  // agents open/close pages, so shared access always requires an exact ID.
   const { targetInfos } = await cdpClient.send<{ targetInfos: TargetInfo[] }>("Target.getTargets");
-  // Story 9.1: Filter to owned tabs only when tab ownership tracking is active
-  const pageTabs = targetInfos.filter((t) => t.type === "page" && (!tabOwnership || tabOwnership.filter(t.targetId)));
-  a11yTree.retainTabs(pageTabs.map((t) => t.targetId)); // B1: tabs closed without switch_tab
+  const pageTabs = targetInfos.filter((t) => t.type === "page");
+  a11yTree.retainTabs(pageTabs.map((t) => t.targetId));
   const resolvedId = resolveTabId(params.tab!, pageTabs);
   if (!resolvedId) {
     return {
@@ -337,26 +343,34 @@ async function handleSwitch(
     };
   }
 
+  if (tabOwnership && !tabOwnership.filter(resolvedId)
+    && (!params.allow_shared || params.tab !== resolvedId)) {
+    return {
+      content: [{ type: "text", text: `Tab ${resolvedId} is shared, not owned. To access it explicitly, use its exact ID with allow_shared:true. Ownership and cleanup rights will not change.` }],
+      isError: true,
+      _meta: { elapsedMs: Math.round(performance.now() - start), method },
+    };
+  }
+  const visualFocus = params.focus ?? !tabOwnership;
+
   // Remember origin tab before switching away
   _originTabId = tabStateCache.activeTargetId ?? undefined;
-  const leaving = leavingTab(tabStateCache, sessionId); // B1: before the active target moves
+  const leaving = leavingTab(tabStateCache, sessionId);
 
   // C1: Remember previous state for rollback if attachToTarget fails
   const previousTargetId = tabStateCache.activeTargetId;
 
-  // Bring tab to front visually + ensure its window is in foreground
-  await cdpClient.send("Target.activateTarget", { targetId: resolvedId });
-  try {
-    const { windowId } = await cdpClient.send<{ windowId: number }>(
-      "Browser.getWindowForTarget",
-      { targetId: resolvedId },
-    );
-    await cdpClient.send("Browser.setWindowBounds", {
-      windowId,
-      bounds: { windowState: "normal" },
-    });
-  } catch {
-    /* best-effort — window focus is not critical */
+  // CDP attachment is independent of the human's visual/foreground tab.
+  if (visualFocus) {
+    await cdpClient.send("Target.activateTarget", { targetId: resolvedId });
+    try {
+      const { windowId } = await cdpClient.send<{ windowId: number }>(
+        "Browser.getWindowForTarget", { targetId: resolvedId },
+      );
+      await cdpClient.send("Browser.setWindowBounds", {
+        windowId, bounds: { windowState: "normal" },
+      });
+    } catch { /* best-effort — window focus is not critical */ }
   }
 
   // C1: Activate CDP session — rollback on failure
@@ -371,7 +385,7 @@ async function handleSwitch(
     );
   } catch (attachErr) {
     // C1: Rollback — re-activate the previous tab visually
-    if (previousTargetId) {
+    if (visualFocus && previousTargetId) {
       try {
         await cdpClient.send("Target.activateTarget", { targetId: previousTargetId });
       } catch {
@@ -420,7 +434,7 @@ async function handleClose(
   // Resolve tab (supports numeric index or targetId)
   let targetTab: string | undefined;
   if (params.tab) {
-    targetTab = resolveTabId(params.tab, pageTabs);
+    targetTab = resolveTabId(params.tab, targetInfos.filter(t => t.type === "page"));
     if (!targetTab) {
       return {
         content: [{ type: "text", text: `Tab not found: ${params.tab}` }],
@@ -440,6 +454,14 @@ async function handleClose(
     };
   }
 
+  if (tabOwnership && !tabOwnership.filter(targetTab)) {
+    return {
+      content: [{ type: "text", text: "Cannot close a shared tab: access does not grant ownership. Switch back to an owned tab instead." }],
+      isError: true,
+      _meta: { elapsedMs: Math.round(performance.now() - start), method },
+    };
+  }
+  const visualFocus = params.focus ?? !tabOwnership;
   const isLastTab = pageTabs.length <= 1;
   const isActiveTab = targetTab === tabStateCache.activeTargetId;
   let newActiveTab: string | undefined;
@@ -448,7 +470,7 @@ async function handleClose(
     // Create a new about:blank tab before closing the last one
     const { targetId: blankTabId } = await cdpClient.send<{ targetId: string }>(
       "Target.createTarget",
-      { url: "about:blank" },
+      { url: "about:blank", ...(tabOwnership && !isHeadless() ? { newWindow: true } : {}) },
     );
     tabOwnership?.track(blankTabId); // Story 9.1: Track the replacement tab
     newActiveTab = blankTabId;
@@ -470,7 +492,7 @@ async function handleClose(
   // Architecture: activateTarget (visual) -> attachToTarget (session) -> close old tab.
   if (newActiveTab) {
     // H1: Activate the new tab visually first
-    await cdpClient.send("Target.activateTarget", { targetId: newActiveTab });
+    if (visualFocus) await cdpClient.send("Target.activateTarget", { targetId: newActiveTab });
 
     // H1: Then attach session. B1: the closing tab's refs are not kept (leaving = null).
     let activated: { sessionId: string; refsRestored: boolean };
@@ -490,7 +512,7 @@ async function handleClose(
       );
       if (fallback) {
         try {
-          await cdpClient.send("Target.activateTarget", { targetId: fallback.targetId });
+          if (visualFocus) await cdpClient.send("Target.activateTarget", { targetId: fallback.targetId });
           const { sessionId: fallbackSessionId, refsRestored: fallbackRestored } = await activateSession(
             cdpClient,
             fallback.targetId,

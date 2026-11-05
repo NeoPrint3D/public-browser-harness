@@ -24,6 +24,8 @@ export interface ResolvedElement {
 export interface ElementTarget {
   ref?: string;
   selector?: string;
+  /** Explicit zero-based match in a fresh CSS query; never a cached ref. */
+  index?: number;
 }
 
 // --- Ref error messages (B1 / S3) ---
@@ -54,7 +56,7 @@ export class AmbiguousSelectorError extends Error {
     const more = count > candidates.length ? `\n  … ${count - candidates.length} more` : "";
     super(
       `Selector '${selector}' matches ${count} elements, so nothing was done. ` +
-      `Use a ref or a more specific selector. Candidates:\n  ${candidates.join("\n  ")}${more}`,
+      `Use a ref or a more specific selector. For click, pass index: 0 (first match), index: 1 (second), etc. Do not retry the unchanged ambiguous selector. Candidates:\n  ${candidates.join("\n  ")}${more}`,
     );
     this.name = "AmbiguousSelectorError";
   }
@@ -117,6 +119,10 @@ export async function resolveElement(
   target: ElementTarget,
   sessionManager?: SessionManager,
 ): Promise<ResolvedElement> {
+  if (target.index !== undefined &&
+      (!Number.isSafeInteger(target.index) || target.index < 0 || !target.selector || target.ref)) {
+    throw new Error("index requires a CSS selector without ref and must be a non-negative safe integer");
+  }
   // Ref path (preferred)
   if (target.ref) {
     // P21: a ref belongs to the document it was assigned in. If the page's main
@@ -275,6 +281,12 @@ export async function resolveElement(
   }
   if (nodeIds.length === 0) {
     throw new Error(`Element not found for selector '${target.selector}'`);
+  }
+  if (target.index !== undefined) {
+    if (target.index >= nodeIds.length) {
+      throw new Error(`Selector '${target.selector}' matches ${nodeIds.length} elements; index ${target.index} is out of range (zero-based).`);
+    }
+    nodeIds = [nodeIds[target.index]];
   }
   if (nodeIds.length > 1) {
     const candidates = await Promise.all(

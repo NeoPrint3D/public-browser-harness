@@ -52,6 +52,11 @@
     "name": "click",
     "inputSchema": {
       "properties": {
+        "index": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
         "ref": {
           "type": "string"
         },

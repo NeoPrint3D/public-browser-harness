@@ -198,6 +198,7 @@ function printHelp(): void {
   console.log("                         If Chrome is already running with the profile,");
   console.log("                         attaches via CDP instead of launching a new instance.");
   console.log("  --attach               Connect to existing Chrome on port 9222 (no auto-launch).");
+  console.log("  --agent-id <id|auto>   Attach: stable tab owner, or auto for a unique ID per connection.");
   console.log("                         Creates its own tab and cleans it up on exit.");
   console.log("  --script               Enable Script API (HTTP server on port 9223) for Python clients.");
   console.log("  --port <port>          CDP port this instance owns (default: 9222).");

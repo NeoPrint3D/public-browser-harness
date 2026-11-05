@@ -283,7 +283,7 @@ const CHROME_FLAGS_CORE = [
   "--disable-backgrounding-occluded-windows",
   "--disable-renderer-backgrounding",
   "--enable-features=CDPScreenshotNewSurface",
-  "--mute-audio",
+  
 ];
 
 /**

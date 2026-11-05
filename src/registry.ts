@@ -28,7 +28,7 @@ import { tabStatusHandler } from "./tools/tab-status.js";
 import type { TabStatusParams } from "./tools/tab-status.js";
 import { switchTabSchema, switchTabHandler } from "./tools/switch-tab.js";
 import type { SwitchTabParams, TabOwnership } from "./tools/switch-tab.js";
-import { virtualDeskHandler } from "./tools/virtual-desk.js";
+import { virtualDeskHandler, virtualDeskSchema } from "./tools/virtual-desk.js";
 import type { VirtualDeskParams, TabFilter } from "./tools/virtual-desk.js";
 import { runPlanSchema, runPlanHandler } from "./tools/run-plan.js";
 import type { RunPlanParams } from "./tools/run-plan.js";
@@ -446,6 +446,7 @@ export class ToolRegistry implements ToolRegistryPublic {
         get sessionId() { return legacyState.sessionId; },
         headless: false,
         scriptMode: false,
+        isolatedTabs: false,
         tabStateCache: legacyTabCache,
         sessionDefaults: legacySessionDefaults,
         sessionManager,
@@ -1094,14 +1095,20 @@ export class ToolRegistry implements ToolRegistryPublic {
     // connection loss, all transparent to the individual tool handler.
     const browserSession = this._browserSession;
 
-    // Story 9.1: Build tab ownership callbacks for script mode.
-    // In script mode, MCP tools only operate on MCP-owned tabs.
-    const tabOwnership: TabOwnership | undefined = browserSession.scriptMode
+    // Story 9.1: Build tab ownership callbacks when tabs are isolated.
+    // Script mode isolates MCP tabs from external CDP clients; attach mode
+    // isolates every agent's tab from the other agents sharing one Chrome.
+    // `isolatedTabs` is optional so legacy mocks fall back to `scriptMode`.
+    const isolatedTabs = browserSession.isolatedTabs ?? browserSession.scriptMode ?? false;
+    const tabOwnership: TabOwnership | undefined = isolatedTabs
       ? {
           filter: (id: string) => browserSession.isOwnedTarget(id),
           track: (id: string) => browserSession.trackOwnedTarget(id),
           untrack: (id: string) => browserSession.untrackOwnedTarget(id),
         }
+      : undefined;
+    const trackNewTab = tabOwnership
+      ? (targetId: string) => tabOwnership.track(targetId)
       : undefined;
     // TabFilter for virtual_desk (same predicate, simpler type)
     const tabFilter: TabFilter | undefined = tabOwnership
@@ -1314,8 +1321,8 @@ export class ToolRegistry implements ToolRegistryPublic {
     // --- 1. Orientation ---
     maybeRegisterFreeMCPTool(
       "virtual_desk",
-      "List all open tabs with IDs, URLs and state. Call it first in every session, after a reconnect, or when unsure; reuse a listed tab ID instead of opening duplicates. Cheap, call liberally.",
-      {},
+      "List the full browser landscape with IDs, URLs, state and owned/shared labels. Visibility does not transfer ownership. Use scope 'owned' for only this session's tabs. Call first and after reconnects; use explicit shared access rather than opening duplicates.",
+      { scope: virtualDeskSchema.shape.scope },
       wrap(async (params) => {
         this._contextChecked = true;
         const result = await virtualDeskHandler(
@@ -1352,13 +1359,21 @@ export class ToolRegistry implements ToolRegistryPublic {
       {
         ref: clickSchema.shape.ref,
         selector: clickSchema.shape.selector,
+        index: clickSchema.shape.index,
         text: clickSchema.shape.text,
         x: clickSchema.shape.x,
         y: clickSchema.shape.y,
         wait_for_diff: clickSchema.shape.wait_for_diff,
       },
       wrap(async (params) => {
-        return clickHandler(params as unknown as ClickParams, this.cdpClient, this.sessionId, this._browserSession.sessionManager);
+        return clickHandler(
+          params as unknown as ClickParams,
+          this.cdpClient,
+          this.sessionId,
+          this._browserSession.sessionManager,
+          trackNewTab,
+          this._browserSession.tabStateCache.activeTargetId ?? undefined,
+        );
       }, "click"),
     );
 
@@ -1489,11 +1504,13 @@ export class ToolRegistry implements ToolRegistryPublic {
 
     maybeRegisterFreeMCPTool(
       "switch_tab",
-      "Open a new tab, switch to a tab by ID (from virtual_desk), or close one. Prefer 'open' over navigate when the user's active tab must stay untouched. Refs from the previous tab are invalid afterwards — call view_page before acting.",
+      "Open an owned page, switch the session's active target, or close an owned tab. Shared tabs require allow_shared:true and an exact target ID; this grants access, not ownership. Isolated switches stay in the background unless focus:true. Reading/acting on a shared page can affect its user or other agents. Call view_page for fresh refs after switching.",
       {
         action: switchTabSchema.shape.action,
         url: switchTabSchema.shape.url,
         tab: switchTabSchema.shape.tab,
+        allow_shared: switchTabSchema.shape.allow_shared,
+        focus: switchTabSchema.shape.focus,
       },
       wrap(async (params) => {
         return switchTabHandler(
@@ -1899,7 +1916,14 @@ export class ToolRegistry implements ToolRegistryPublic {
       return observeHandler(params as unknown as ObserveParams, this.cdpClient, sessionIdOverride ?? this.sessionId, frameSessions(sessionIdOverride));
     });
     this._handlers.set("click", async (params, sessionIdOverride?) => {
-      return clickHandler(params as unknown as ClickParams, this.cdpClient, sessionIdOverride ?? this.sessionId, frameSessions(sessionIdOverride));
+      return clickHandler(
+        params as unknown as ClickParams,
+        this.cdpClient,
+        sessionIdOverride ?? this.sessionId,
+        frameSessions(sessionIdOverride),
+        trackNewTab,
+        this._browserSession.tabStateCache.activeTargetId ?? undefined,
+      );
     });
     this._handlers.set("type", async (params, sessionIdOverride?) => {
       return typeHandler(params as unknown as TypeParams, this.cdpClient, sessionIdOverride ?? this.sessionId, frameSessions(sessionIdOverride));

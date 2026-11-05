@@ -48,6 +48,10 @@ __pycache__/
 .playwright-mcp/
 .playwright-cli/
 
+# Public Browser harness: per-machine overrides and in-repo state
+harness/profiles.local.json
+harness/.state/
+
 # Internal dev tooling (not for public repo)
 CLAUDE.md
 .claude/
@@ -99,6 +103,7 @@ scripts/*
 !scripts/publish.ts
 !scripts/publish.test.ts
 !scripts/token-count.mjs
+!scripts/benchmark-hot-paths.mjs
 !scripts/build-mcpb.mjs
 !scripts/make-benchmark-chart-2026-09.py
 !scripts/make-benchmark-chart-2026-09-24.py

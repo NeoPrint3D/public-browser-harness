@@ -1,0 +1,36 @@
+# Template used by `node harness/harness.mjs install-service`.
+#
+# The installer replaces the placeholders below with absolute paths for the
+# current machine and writes the result to:
+#   ~/.config/systemd/user/public-browser-harness@.service
+#
+# Do not edit the installed copy by hand; rerun install-service instead.
+#
+#   systemctl --user enable --now public-browser-harness@default.service
+#   systemctl --user status public-browser-harness@default.service
+#   journalctl --user -u public-browser-harness@default.service -f
+
+[Unit]
+Description=Public Browser harness Chrome (%i)
+Documentation=__DOC__
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart="__NODE__" "__HARNESS__" run %i --config "__CONFIG__"
+WorkingDirectory=__WORKDIR__
+Restart=always
+RestartSec=2
+# Let the supervisor stop Chrome gracefully and flush profile databases.
+KillMode=mixed
+TimeoutStopSec=20
+Environment=NODE_ENV=production
+Environment="PATH=__PATH__"
+# Uncomment and set these for a headed Chrome on a desktop/headless X server:
+# Environment="DISPLAY=:0"
+# Environment="XAUTHORITY=/home/you/.Xauthority"
+
+[Install]
+WantedBy=default.target

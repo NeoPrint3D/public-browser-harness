@@ -20,7 +20,14 @@ export const clickSchema = z.object({
   selector: z
     .string()
     .optional()
-    .describe("CSS selector (fallback)"),
+    .describe("CSS selector (fallback); use index to choose among duplicate matches"),
+  index: z
+    .number()
+    .int()
+    .min(0)
+    .max(Number.MAX_SAFE_INTEGER)
+    .optional()
+    .describe("Zero-based CSS match index (0 = first). Requires selector, without ref/text/coordinates. Queries the current DOM; does not reuse refs."),
   text: z
     .string()
     .optional()
@@ -67,6 +74,8 @@ interface TargetInfo {
   type: string;
   url: string;
   title: string;
+  /** CDP `TargetInfo.openerId` — the tab that opened this one, when known. */
+  openerId?: string;
 }
 
 interface ClickResult { method: ClickMethod; x: number; y: number }
@@ -336,6 +345,18 @@ export async function clickHandler(
   cdpClient: CdpClient,
   sessionId?: string,
   sessionManager?: SessionManager,
+  /**
+   * Optional callback for a tab opened by this click. Attach-mode sessions
+   * use it to claim the new tab, so other agents sharing the same Chrome
+   * never see or switch to it.
+   */
+  onNewTab?: (targetId: string) => void,
+  /**
+   * The tab this click ran in. When set, only new tabs whose `openerId`
+   * points at it are claimed in isolated sessions. A tab without a known
+   * opener cannot safely be attributed to this agent.
+   */
+  sourceTargetId?: string,
 ): Promise<ToolResponse> {
   const start = performance.now();
 
@@ -352,6 +373,15 @@ export async function clickHandler(
     const { humanMouseMove: _humanMouseMove, ...rest } = rawParams;
     void _humanMouseMove;
     params = rest as unknown as ClickParams;
+  }
+
+  if (params.index !== undefined &&
+      (!params.selector || params.ref || params.text || params.x !== undefined || params.y !== undefined)) {
+    return {
+      content: [{ type: "text", text: "click index requires selector without ref, text, or coordinates" }],
+      isError: true,
+      _meta: { elapsedMs: Math.round(performance.now() - start), method: "click" },
+    };
   }
 
   // FR-D: Coordinate-based click — skip element resolution entirely
@@ -416,7 +446,7 @@ export async function clickHandler(
       await cdpClient.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: dispatchX, y: dispatchY, button: "left", buttons: 0, clickCount: 1 }, sessionId);
 
       // FR-E: Check for new tabs after click
-      const newTabHint = await detectNewTab(cdpClient, beforeTabIds);
+      const newTabHint = await detectNewTab(cdpClient, beforeTabIds, onNewTab, sourceTargetId);
 
       const elapsedMs = Math.round(performance.now() - start);
       const scrollHint = autoScrolled ? ` (auto-scrolled from page position)` : "";
@@ -520,7 +550,10 @@ export async function clickHandler(
     } catch { /* non-critical */ }
 
     // Resolve element via shared utility (with OOPIF routing)
-    const target = params.ref ? { ref: params.ref } : { selector: params.selector };
+    const target = params.ref ? { ref: params.ref } : {
+      selector: params.selector,
+      ...(params.index !== undefined ? { index: params.index } : {}),
+    };
     const element = await resolveElement(cdpClient, sessionId!, target, sessionManager);
 
     // S3: name the target before the click — the click may remove it.
@@ -532,7 +565,7 @@ export async function clickHandler(
     );
 
     // FR-E: Check for new tabs after click
-    const newTabHint = await detectNewTab(cdpClient, beforeTabIds);
+    const newTabHint = await detectNewTab(cdpClient, beforeTabIds, onNewTab, sourceTargetId);
 
     // Story 13a.2: Classify clicked element for ambient context decision.
     //
@@ -624,12 +657,21 @@ function hasPageTitle(tab: TargetInfo): boolean {
 async function detectNewTab(
   cdpClient: CdpClient,
   beforeTabIds?: Set<string>,
+  onNewTab?: (targetId: string) => void,
+  sourceTargetId?: string,
 ): Promise<string> {
   if (!beforeTabIds) return "";
   try {
     const { targetInfos } = await cdpClient.send<{ targetInfos: TargetInfo[] }>("Target.getTargets");
-    const newTabs = targetInfos.filter(t => t.type === "page" && !beforeTabIds.has(t.targetId));
+    const newTabs = targetInfos.filter(
+      (t) =>
+        t.type === "page" &&
+        !beforeTabIds.has(t.targetId) &&
+        // Never claim an unrelated agent's new tab, even when it has no opener.
+        (!onNewTab || !sourceTargetId || t.openerId === sourceTargetId),
+    );
     if (newTabs.length > 0) {
+      for (const tab of newTabs) onNewTab?.(tab.targetId);
       // S4: the ID is what switch_tab needs; the title is for orientation, so
       // it gets a short wait (the new page is usually still loading).
       let tab = newTabs[0];

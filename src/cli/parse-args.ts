@@ -12,6 +12,7 @@
 export interface ParsedCliArgs {
   attach: boolean;
   script: boolean;
+  agentId?: string;
   profile?: string;
   /** Raw Chrome `--user-data-dir`. Created if missing; `--profile` wins. */
   userDataDir?: string;
@@ -34,6 +35,7 @@ export interface ParsedCliArgs {
 /** Flags that take a value (`--flag value` or `--flag=value`). */
 const VALUE_FLAGS = new Set([
   "--profile",
+  "--agent-id",
   "--port",
   "--cdp-port",
   "--host",
@@ -121,6 +123,13 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     }
 
     switch (flag) {
+      case "--agent-id":
+        if (!/^[a-zA-Z0-9_-]{1,128}$/.test(value)) {
+          result.errors.push("--agent-id requires 1–128 letters, digits, underscores or hyphens.");
+        } else {
+          result.agentId = value;
+        }
+        break;
       case "--profile":
         result.profile = value;
         break;
