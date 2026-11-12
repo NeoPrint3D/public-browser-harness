@@ -411,7 +411,6 @@ export function buildChromeArgs(profile) {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-default-apps",
-    "--disable-background-networking",
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
